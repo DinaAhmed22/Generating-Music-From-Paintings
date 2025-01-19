@@ -1,0 +1,138 @@
+import os
+import torch
+import torchvision.transforms as transforms
+from torchvision.models import resnet50
+from torch.utils.data import DataLoader, Dataset
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+from torchaudio.transforms import MelSpectrogram
+import librosa
+import numpy as np
+import sounddevice as sd
+
+# Device setup for CPU-only
+device = "cpu"
+class ImageAudioDataset(Dataset):
+    def __init__(self, image_dir, audio_dir, transform=None):
+        self.image_paths = [os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(('.jpg', '.png'))]
+        self.audio_paths = [os.path.join(audio_dir, f) for f in os.listdir(audio_dir) if f.endswith('.wav')]
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        # Load image
+        image_path = self.image_paths[idx]
+        image = transforms.ToTensor()(transforms.Resize((224, 224))(Image.open(image_path).convert("RGB")))
+        if self.transform:
+            image = self.transform(image)
+
+        # Load audio
+        audio_path = self.audio_paths[idx]
+        audio, sr = librosa.load(audio_path, sr=32000)
+        mel = MelSpectrogram()(torch.tensor(audio).float()).numpy()
+
+        return image, mel
+
+# Dataset paths
+image_dir = r"C:\Dinass\Master\Selected Topics\Presentation 2\data_model\angry"
+audio_dir = r"C:\Dinass\Master\Selected Topics\Presentation 2\archive (1)\dataset\Audio"
+transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()])
+dataset = ImageAudioDataset(image_dir, audio_dir, transform=transform)
+dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+
+
+
+import torch
+from torchvision.models import resnet50
+import torch.nn.functional as F
+
+# Define the Emotion Labeling Model
+def emotion_labeling_model():
+    model = resnet50(pretrained=True)
+    for param in model.parameters():
+        param.requires_grad = False
+    model.fc = torch.nn.Sequential(
+        torch.nn.Linear(model.fc.in_features, 256),
+        torch.nn.ReLU(),
+        torch.nn.Dropout(0.3),
+        torch.nn.Linear(256, 5)  # Assuming 5 emotion classes
+    )
+    return model
+
+# Initialize the Model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+emotion_model = emotion_labeling_model().to(device)
+
+# Simulated Example: Input Images
+# Batch of 3 random tensors simulating (batch_size, 3, 224, 224) images
+images = torch.randn(3, 3, 224, 224).to(device)
+
+# Step 1: Get Logits (Raw Scores) from the Model
+logits = emotion_model(images)  # Output shape: (batch_size, 5)
+
+# Step 2: Convert Logits to Probabilities
+probabilities = F.softmax(logits, dim=1)  # Output shape: (batch_size, 5)
+
+# Step 3: Get Predicted Classes
+predicted_classes = torch.argmax(probabilities, dim=1)  # Output shape: (batch_size,)
+
+# Print Results
+print("Logits (Raw Scores):")
+print(logits)
+
+print("\nProbabilities:")
+print(probabilities)
+
+print("\nPredicted Classes (Emotion Indices):")
+print(predicted_classes)
+import os
+from PIL import Image
+import matplotlib.pyplot as plt
+from transformers import pipeline
+
+# Initialize the image captioning pipeline
+captioning_pipeline = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base", device=-1)
+
+# Exact match accuracy calculation
+def calculate_exact_match(reference, generated):
+    return 1 if reference.strip().lower() == generated.strip().lower() else 0
+
+def generate_caption(image):
+    # Get the caption from the image
+    caption = captioning_pipeline(image)[0]["generated_text"]
+    return caption
+
+# Directory containing the WikiArt dataset images
+
+image_dir = r"C:\Dinass\Master\Selected Topics\Presentation 2\data_model\angry"
+
+
+def process_images_in_directory(directory):
+    correct_predictions = 0
+    total_images = 0
+    for filename in os.listdir(directory):
+        if filename.endswith(".jpg") or filename.endswith(".jpeg") or filename.endswith(".png"):
+            image_path = os.path.join(directory, filename)
+            
+            # Open the image using PIL
+            image = Image.open(image_path)
+            
+            # Generate a caption for the image
+            caption = generate_caption(image)
+            
+            # Display the image with the generated caption
+            plt.figure(figsize=(6, 6))
+            plt.imshow(image)
+            plt.axis('off')  # Hide the axes
+            plt.title(f"Caption: {caption}")
+            plt.show()
+            
+            print(f"Image: {filename}")
+            print(f"Generated Caption: {caption}")
+        
+    
+
+
+if __name__ == "__main__":
+    process_images_in_directory(image_dir)
