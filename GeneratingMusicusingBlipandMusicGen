@@ -1,0 +1,194 @@
+import os
+import torch
+from PIL import Image
+import matplotlib.pyplot as plt
+from transformers import pipeline, CLIPProcessor, CLIPModel, T5Tokenizer, T5ForConditionalGeneration, AutoProcessor, MusicgenForConditionalGeneration
+from scipy.io.wavfile import write
+import hashlib
+from datetime import datetime  # Import datetime for unique filenames
+from sklearn.metrics.pairwise import cosine_similarity
+# Initialize the image captioning pipeline on GPU 
+captioning_pipeline = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base", device=0 if torch.cuda.is_available() else -1)
+
+# Load a pre-trained CLIP model for text-image similarity checking
+clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)  # Move to GPU if available
+
+# Load T5 model for enhancing captions with musical context
+t5_tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-small")
+t5_model = T5ForConditionalGeneration.from_pretrained("google/flan-t5-small").to(device)
+
+# Load the MusicGen model and processor
+musicgen_processor = AutoProcessor.from_pretrained("facebook/musicgen-small")
+musicgen_model = MusicgenForConditionalGeneration.from_pretrained("facebook/musicgen-small").to(device)
+# Exact match accuracy calculation
+def calculate_exact_match(reference, generated):
+    return 1 if reference.strip().lower() == generated.strip().lower() else 0
+
+def generate_caption(image):
+    # Get the caption from the image using the BLIP model
+    caption = captioning_pipeline(image)[0]["generated_text"]
+    return caption
+
+# Function to calculate similarity between generated caption and the "Egyptian Pharaohs" topic
+def check_caption_relevance(caption, target_phrase="Egyptian Pharaoh"):
+    # Encode the caption and target phrase using CLIP model
+    inputs = clip_processor(text=[caption, target_phrase], return_tensors="pt", padding=True).to(device)
+    with torch.no_grad():
+        embeddings = clip_model.get_text_features(**inputs)
+    
+    caption_embedding = embeddings[0].cpu().numpy().reshape(1, -1)
+    target_embedding = embeddings[1].cpu().numpy().reshape(1, -1)
+
+    # Calculate cosine similarity
+    similarity = cosine_similarity(caption_embedding, target_embedding)
+    
+    # Return the similarity score, if it's above a threshold, consider it relevant
+    return similarity[0][0] > 0.35  # Threshold can be adjusted# Function to enhance caption with musical context using T5
+def enhance_caption_with_music_context(caption):
+    # Create a prompt for the T5 model
+    prompt = f"""
+    Enhance the following image description with musical context. Include details like mood, genre, tempo, and melody:
+    Image Description: "{caption}"
+    Musical Description:
+    """
+    
+    # Tokenize the input prompt
+    inputs = t5_tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True).to(device)
+    
+    # Generate the enhanced caption
+    outputs = t5_model.generate(**inputs, max_length=100)
+    
+    # Decode the output tokens to text
+    enhanced_caption = t5_tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return enhanced_caption
+ #Function to generate music from a text description using MusicGen
+def generate_music_from_text(text_description, duration=10):
+    """
+    Generate music from a text description using the MusicGen model.
+    
+    Args:
+        text_description (str): The text description of the music.
+        duration (int): The duration of the generated music in seconds.
+    
+    Returns:
+        audio_values (torch.Tensor): The generated audio waveform.
+    """
+    # Tokenize the input text
+    inputs = musicgen_processor(
+        text=[text_description],
+        padding=True,
+        return_tensors="pt",
+    ).to(device)
+    
+    # Generate music
+    with torch.no_grad():
+        audio_values = musicgen_model.generate(**inputs, max_new_tokens=int(duration * 50))  # Adjust tokens based on duration
+    
+    return audio_values
+
+# Function to generate a unique filename based on the caption content and timestamp
+def generate_unique_filename(caption, extension=".wav"):
+    """
+    Generate a unique filename based on the caption content and a timestamp.
+    
+    Args:
+        caption (str): The enhanced caption.
+        extension (str): The file extension (e.g., ".wav" or ".png").
+    
+    Returns:
+        filename (str): A unique filename for the file.
+    """
+    # Create a hash of the caption to ensure uniqueness
+    hash_object = hashlib.md5(caption.encode())
+    hash_hex = hash_object.hexdigest()
+    
+    # Add a timestamp to the filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create a filename using the hash and timestamp
+    filename = f"output_{hash_hex}_{timestamp}{extension}"
+    return filename
+# Function to save and play the generated music
+def save_and_play_music(audio_values, caption, sample_rate=32000, output_dir="output"):
+    
+   
+    # Generate a unique filename based on the caption and timestamp
+    filename = generate_unique_filename(caption, extension=".wav")
+    filepath = os.path.join(output_dir, filename)
+    
+    # Convert the audio tensor to a NumPy array
+    audio_array = audio_values.cpu().numpy().squeeze()
+    
+    # Save the audio as a WAV file
+    write(filepath, sample_rate, audio_array)
+    
+    return filepath
+
+def save_image_with_captions(image, caption, enhanced_caption, output_dir="output"):
+
+    # Create the output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Generate a unique filename based on the enhanced caption and timestamp
+    filename = generate_unique_filename(enhanced_caption, extension=".png")
+    filepath = os.path.join(output_dir, filename)
+    
+    # Display the image with captions
+    plt.figure(figsize=(6, 6))
+    plt.imshow(image)
+    plt.axis('off')  # Hide the axes
+    plt.title(f"Caption: {caption}\nEnhanced Caption: {enhanced_caption}")
+    
+    # Save the figure
+    plt.savefig(filepath, bbox_inches="tight", pad_inches=0.1)
+    plt.close()
+    
+    return filepath
+image_dir = r"D:\Master\Selected Topics\Round3\Image dataset-20250119T210031Z-001\Image dataset"
+# Output directory for saving music and images
+output_dir = r"D:\Master\Selected Topics\Round3\output\musicop\op2"def process_images_in_directory(directory, output_dir=output_dir):
+    correct_predictions = 0
+    total_images = 0
+    for filename in os.listdir(directory):
+        if filename.endswith(".jpg") or filename.endswith(".jpeg") or filename.endswith(".png"):
+            image_path = os.path.join(directory, filename)
+            
+            # Open the image using PIL
+            image = Image.open(image_path)
+            
+            # Step 1: Generate a caption for the image
+            caption = generate_caption(image)
+            print(f"Generated Caption: {caption}")
+            
+            # Step 2: Enhance the caption with musical context
+            enhanced_caption = enhance_caption_with_music_context(caption)
+            print(f"Enhanced Caption: {enhanced_caption}")
+            
+            # Step 3: Generate music from the enhanced caption
+            audio_values = generate_music_from_text(enhanced_caption, duration=10)  # Generate 10 seconds of music
+            
+            # Step 4: Save the generated music
+            audio_filename = save_and_play_music(audio_values, enhanced_caption, output_dir=output_dir)
+            print(f"Saved audio as: {audio_filename}")
+            
+            # Step 5: Save the image with captions
+            image_filename = save_image_with_captions(image, caption, enhanced_caption, output_dir=output_dir)
+            print(f"Saved image as: {image_filename}")
+            
+            # Check if the caption is relevant to "Egyptian Pharaohs"
+            is_relevant = check_caption_relevance(caption)
+            if is_relevant:
+                correct_predictions += 1
+            
+            total_images += 1
+        
+    # Print performance
+    print(f"\nTotal Images: {total_images}")
+    print(f"Correct Predictions (Related to Egyptian Pharaohs): {correct_predictions}")
+    print(f"Accuracy: {correct_predictions / total_images * 100:.2f}%")
+
+# Run the pipeline
+if __name__ == "__main__":
+    process_images_in_directory(image_dir, output_dir=output_dir)
