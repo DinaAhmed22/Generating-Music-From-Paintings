@@ -1,21 +1,12 @@
-# Generating-Music-From-Paintings
-This project generates music from paintings by using computer vision and deep learning. It extracts features from images, generates captions with the BLIP Transformer model, and uses those captions to guide a music generation model, creating compositions inspired by the visual art.
-Workflow Overview
+Generating Music from Paintings: A Multimodal AI Approach(Hear The Art)
 
-1)Dataset Preparation
+A deep learning project that generates music from any image using computer vision and NLP. The system extracts captions from images, refines Arabic text, and retrieves or generates matching music.
 
-a)Collect a dataset of Arabic images (e.g., art, historical artifacts, landscapes).
-b)Collect or generate a music dataset in Arabic themes (e.g., traditional instruments, maqam scales, Arabic melodies).
-Preprocessing
+Key Features
+✅ Image captioning using fine-tuned BLIP & T5 models
+✅ CLIP-based feature extraction to detect Egyptian-themed images
+✅ Music retrieval from an existing Arabic music dataset
+✅ AI-generated compositions for unique image-music pairing
+✅ User-friendly Tkinter GUI for easy interaction
 
-c)Images: Preprocess using computer vision techniques (e.g., resizing, normalization, feature extraction).
-d) Use digital signal processing (DSP) to extract relevant features (e.g., spectrograms, MFCCs).
-Model Selection
-
-2)Use multimodal models that learn embeddings from both images and music (e.g., CLIP or custom vision-to-sound models).
-Training
-
-3)Train the model to map image features to corresponding music features.
-Music Generation
-
-4)Use a generative model (e.g., GANs, MusicLM, or Jukebox) to create music based on image-to-music mappings.
+🚀 Future Plans: Expanding the dataset, refining music selection with reinforcement learning, mobile app deployment, and GPU optimization.
