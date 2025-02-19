@@ -1,121 +1,141 @@
 import os
-import torch
-from torch.optim import AdamW
+from transformers import BlipProcessor, BlipForConditionalGeneration
 from torch.utils.data import DataLoader
-from transformers import (
-    MarianMTModel, MarianTokenizer, BlipProcessor, BlipForConditionalGeneration
-)
 from datasets import Dataset
 from PIL import Image
 from tqdm import tqdm
-from torch.cuda.amp import GradScaler, autocast
+import torch
+from torch.optim import Adam
+from torch.optim.lr_scheduler import StepLR  # Learning rate scheduler
 
-# Set device (GPU if available)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Enable CUDA DSA for better debugging
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
-# Load BLIP model and processor for captioning
-captioning_model_name = "Salesforce/blip-image-captioning-base"
-blip_processor = BlipProcessor.from_pretrained(captioning_model_name)
-blip_model = BlipForConditionalGeneration.from_pretrained(captioning_model_name).to(device)
+# Load BLIP model and processor (using the large model for better performance)
+processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
-# Load MarianMT model and tokenizer for translation
-translation_model_name = "Helsinki-NLP/opus-mt-en-ar"
-marian_tokenizer = MarianTokenizer.from_pretrained(translation_model_name)
-marian_model = MarianMTModel.from_pretrained(translation_model_name).to(device)
+# Define the directory where your images are stored
+image_dir = r"D:\Master\Selected Topics\processed_images"  # Adjust this path to where your images are located
 
-# Path to image dataset
-image_dir = r"D:/Master/Selected Topics/labeled_images"
+# Load previously generated captions from the text file
+caption_file = r"D:\Master\Selected Topics\processed_images\generated_captions.txt"
+captions = {}
 
-# Function to generate captions using BLIP
-def generate_caption(image_path):
-    image = Image.open(image_path).convert("RGB")
-    inputs = blip_processor(images=image, return_tensors="pt").to(device)
+# Read captions from the file
+with open(caption_file, "r") as f:
+    for line in f:
+        if line.strip():  # Avoid empty lines
+            image_name, caption = line.split(":", 1)
+            image_name = image_name.strip()  # Remove leading/trailing spaces
+            caption = caption.strip()  # Remove leading/trailing spaces
+            captions[image_name] = caption
+
+# Get the full paths of the images in the directory
+image_paths = [os.path.join(image_dir, image_name) for image_name in os.listdir(image_dir) if image_name in captions]
+captions_list = [captions[os.path.basename(img_path)] for img_path in image_paths]  # List of corresponding captions
+
+# Create a dictionary with image paths and captions for the dataset
+data = {
+    "image": image_paths,
+    "caption": captions_list
+}
+
+# Create the dataset from the dictionary
+dataset = Dataset.from_dict(data)
+
+# Define a custom collate function
+def collate_fn(batch):
+    images = []
+    captions = []
     
-    with torch.no_grad():
-        output = blip_model.generate(**inputs)
-    
-    caption = blip_processor.decode(output[0], skip_special_tokens=True)
-    return caption
+    for item in batch:
+        img_path = item["image"]
+        if os.path.exists(img_path):  # Check if image exists
+            img = Image.open(img_path).convert("RGB")
+            images.append(img)
+            captions.append(item["caption"])
+        else:
+            print(f"Image not found: {img_path}")
 
-# Function to translate captions using MarianMT
-def translate_caption(english_caption):
-    inputs = marian_tokenizer(english_caption, return_tensors="pt", padding=True, truncation=True).to(device)
+    # Process images and captions (tokenize captions as labels)
+    inputs = processor(images=images, text=captions, padding=True, return_tensors="pt")
     
-    with torch.no_grad():
-        translated = marian_model.generate(**inputs)
+    # The processor returns a dictionary with input_ids and attention_mask,
+    # but we also need to set the labels for training
+    labels = inputs["input_ids"].clone()  # Use input_ids as labels for language modeling
     
-    translated_text = marian_tokenizer.decode(translated[0], skip_special_tokens=True)
-    return translated_text
-
-# Function to create dataset
-def create_dataset(image_dir):
-    image_paths = [os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith((".jpg", ".jpeg", ".png"))]
-    data = {'image': [], 'caption': []}
+    # Set the labels for training (mask padding tokens to -100 so they aren't used for loss computation)
+    labels[labels == processor.tokenizer.pad_token_id] = -100
     
-    for image_path in tqdm(image_paths, desc="Generating Captions & Translating"):
-        caption = generate_caption(image_path)
-        arabic_caption = translate_caption(caption)
-        
-        data['image'].append(image_path)
-        data['caption'].append(arabic_caption)
+    # Add labels to the inputs dictionary
+    inputs["labels"] = labels
     
-    return Dataset.from_dict(data)
-
-# Create dataset
-dataset = create_dataset(image_dir)
-
-# Tokenize captions for MarianMT training
-def preprocess_data(examples):
-    inputs = marian_tokenizer(examples['caption'], max_length=128, truncation=True, padding="max_length")
-    inputs['labels'] = inputs['input_ids'].copy()  # Labels are the same as input_ids for MarianMT
     return inputs
 
-tokenized_dataset = dataset.map(preprocess_data, batched=True)
+# Create a DataLoader
+train_dataloader = DataLoader(dataset, batch_size=2, collate_fn=collate_fn)
 
-# Create DataLoader with reduced batch size
-dataloader = DataLoader(tokenized_dataset, batch_size=4, shuffle=True)  # Reduced batch size
+# Set up the training loop
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
 
-# Optimizers
-optimizer_blip = AdamW(blip_model.parameters(), lr=1e-5)
-optimizer_marian = AdamW(marian_model.parameters(), lr=5e-5)
+# Training hyperparameters
+num_epochs = 11 # Increased number of epochs for training
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-# Initialize GradScaler for mixed precision training
-scaler = GradScaler()
+# Optimizer
+optimizer = Adam(model.parameters(), lr=1e-5)  # Keep the learning rate low for fine-tuning
 
-# Training for BLIP with gradient accumulation and mixed precision
-gradient_accumulation_steps = 4  # Accumulate gradients over 4 batches
-blip_model.train()
-optimizer_blip.zero_grad()
-for i, batch in enumerate(tqdm(dataloader, desc="Training BLIP")):
-    # Process image batch for BLIP
-    images = [Image.open(image_path).convert("RGB") for image_path in batch['image']]
-    inputs_blip = blip_processor(images=images, return_tensors="pt").to(device)
-    captions = batch['caption']
-    text_inputs = blip_processor(text=captions, return_tensors="pt", padding=True, truncation=True).to(device)
-    
-    # Mixed precision training
-    with autocast():
-        outputs_blip = blip_model(pixel_values=inputs_blip.pixel_values, input_ids=text_inputs.input_ids, labels=text_inputs.input_ids)
-        loss_blip = outputs_blip.loss / gradient_accumulation_steps  # Normalize loss
-    
-    scaler.scale(loss_blip).backward()  # Scale loss and perform backward pass
-    
-    # Perform optimizer step after accumulating gradients
-    if (i + 1) % gradient_accumulation_steps == 0:
-        scaler.step(optimizer_blip)
-        scaler.update()
-        optimizer_blip.zero_grad()
+# Scheduler
+scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=2, factor=0.1, verbose=True)
 
-# Save fine-tuned models
-save_dir_blip = "./fine_tuned_captioning_model"
-save_dir_marian = "./fine_tuned_translation_model"
 
-os.makedirs(save_dir_blip, exist_ok=True)
-os.makedirs(save_dir_marian, exist_ok=True)
+# Define the path for saving the model
+save_path = r"D:\Master\Selected Topics\Round3\blip"
 
-blip_model.save_pretrained(save_dir_blip)
-blip_processor.save_pretrained(save_dir_blip)
-marian_model.save_pretrained(save_dir_marian)
-marian_tokenizer.save_pretrained(save_dir_marian)
+# Start the training loop
+for epoch in range(num_epochs):
+    model.train()
+    total_loss = 0
+    progress_bar = tqdm(train_dataloader, desc=f"Training Epoch {epoch + 1}/{num_epochs}")
 
-print(f"Models saved:\n- BLIP: {save_dir_blip}\n- Marian: {save_dir_marian}")
+    for batch in progress_bar:
+        # Move batch to the device
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
+        pixel_values = batch["pixel_values"].to(device)  # Ensure pixel_values are also passed
+
+        # Forward pass
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, pixel_values=pixel_values)
+        loss = outputs.loss
+        total_loss += loss.item()
+
+        # Backward pass
+        loss.backward()
+
+        optimizer.step()  # Perform optimization step
+        optimizer.zero_grad()  # Reset gradients
+
+        progress_bar.set_postfix(loss=total_loss / (progress_bar.n + 1))
+
+    # Print the average loss for the epoch
+    avg_loss = total_loss / len(train_dataloader)
+    print(f"Epoch {epoch + 1}/{num_epochs}, Average Loss: {avg_loss}")
+
+    # Save the model, processor, and config after each epoch
+    epoch_save_path = os.path.join(save_path, f"blip_finetuned_epoch_{epoch + 1}")
+    model.save_pretrained(epoch_save_path)
+    processor.save_pretrained(epoch_save_path)
+    model.config.save_pretrained(epoch_save_path)
+
+    # Step the scheduler after each epoch
+    scheduler.step(avg_loss)
+
+
+# Save the final fine-tuned model, processor, and config
+final_save_path = os.path.join(save_path, "blip_finetuned_final")
+model.save_pretrained(final_save_path)
+processor.save_pretrained(final_save_path)
+model.config.save_pretrained(final_save_path)
