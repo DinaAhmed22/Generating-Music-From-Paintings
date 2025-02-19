@@ -1,0 +1,122 @@
+import os
+import json
+import torch
+from transformers import T5Tokenizer, T5ForConditionalGeneration
+from datasets import Dataset
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.nn.utils import clip_grad_norm_
+from tqdm import tqdm
+
+# Set device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load T5 model and tokenizer
+model_name = "t5-small"
+tokenizer = T5Tokenizer.from_pretrained(model_name)
+model = T5ForConditionalGeneration.from_pretrained(model_name).to(device)
+
+# Load metadata file
+metadata_file = r"D:\Master\Selected Topics\processed_images\enhanced_captions_T5.txt"
+metadata_list = []
+
+with open(metadata_file, "r", encoding="utf-8") as f:
+    for line in f:
+        if line.strip():
+            image_id, details = line.split(":", 1)  # Split image filename from metadata
+            parts = details.split("|")  # Split metadata fields
+            
+            category = parts[0].strip()
+            instruments = parts[1].replace("Instruments:", "").strip()
+            tempo = parts[2].replace("Tempo:", "").strip()
+            
+            # Format input and target text
+            source_text = f"Describe the music for: {category} | Instruments: {instruments} | Tempo: {tempo}"
+            target_text = f"This music piece is played using {instruments}, with a {tempo}."
+
+            metadata_list.append({"source_text": source_text, "target_text": target_text})
+
+# Create dataset
+dataset = Dataset.from_list(metadata_list)
+
+# Tokenization function
+def tokenize(batch):
+    inputs = tokenizer(batch["source_text"], padding="max_length", truncation=True, max_length=128)
+    targets = tokenizer(batch["target_text"], padding="max_length", truncation=True, max_length=128)
+    
+    labels = targets["input_ids"]
+    labels = [[-100 if token == tokenizer.pad_token_id else token for token in label] for label in labels]
+
+    return {
+        "input_ids": inputs["input_ids"],
+        "attention_mask": inputs["attention_mask"],
+        "labels": labels,
+    }
+
+# Tokenize dataset
+dataset = dataset.map(tokenize, batched=True)
+
+# Data collate function
+def collate_fn(batch):
+    return {
+        "input_ids": torch.tensor([item["input_ids"] for item in batch]),
+        "attention_mask": torch.tensor([item["attention_mask"] for item in batch]),
+        "labels": torch.tensor([item["labels"] for item in batch]),
+    }
+
+# DataLoader
+train_dataloader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=collate_fn)
+
+# Training Setup
+num_epochs = 10
+learning_rate = 1e-6
+
+optimizer = AdamW(model.parameters(), lr=learning_rate)
+
+# Training Loop
+for epoch in range(num_epochs):
+    model.train()
+    total_loss = 0
+    progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+
+    for batch in progress_bar:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
+
+        optimizer.zero_grad()
+
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+
+        clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        total_loss += loss.item()
+        progress_bar.set_postfix(loss=total_loss / (progress_bar.n + 1))
+
+    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {total_loss / len(train_dataloader)}")
+
+# Save Model
+save_path = r"D:\Master\Selected Topics\T5_Finetuned"
+os.makedirs(save_path, exist_ok=True)
+
+model.save_pretrained(save_path)
+tokenizer.save_pretrained(save_path)
+
+config = {
+    "model_name": model_name,
+    "num_epochs": num_epochs,
+    "learning_rate": learning_rate,
+    "batch_size": 2,
+   
+    "device": str(device),
+    "metadata_file": metadata_file,
+}
+
+config_path = os.path.join(save_path, "training_config.json")
+with open(config_path, "w") as f:
+    json.dump(config, f, indent=4)
+
+print(f"Fine-tuned T5 model saved at {save_path}")
